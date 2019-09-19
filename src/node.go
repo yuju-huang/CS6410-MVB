@@ -5,15 +5,16 @@ import (
    "flag"
    "strings"
    "strconv"
-   "bytes"
+//   "bytes"
    "os"
    "net"
-   "encoding/hex"
+//   "encoding/hex"
    "crypto/sha256"
    "sync"
    "time"
-   "unsafe"
+//   "unsafe"
    "bufio"
+   "math/rand"
 )
 
 var transactionSeen map[string]bool
@@ -23,7 +24,7 @@ var bseenmutex sync.Mutex
 var accountAmount map[string]int
 var aamountmutex sync.Mutex
 var blockmsgs [][]byte
-
+var debugFlag = false
 
 func main() {
    var port string
@@ -44,6 +45,9 @@ func main() {
       flag.Usage()
       os.Exit(1)
    }
+
+   //setting random seed
+   rand.Seed(time.Now().UTC().UnixNano())
 
    //create a list of peer ports to connect to
    peers := strings.Split(peersStr, ",")
@@ -163,7 +167,9 @@ func broadcaster(broadcast chan []byte, peers []string, broadcastgroup *sync.Wai
          return
       }
       for _, conn := range peerConnections {
-         fmt.Println("forwarding message to ", conn.RemoteAddr())
+         if debugFlag {
+            // fmt.Println("forwarding message to ", conn.RemoteAddr())
+         }
          conn.Write(msg)
       }
       msg, more = <-broadcast
@@ -279,7 +285,19 @@ func handleIncomingConnection(conn *net.TCPConn, broadcast chan []byte, txchan c
 }
 
 func handleTransaction(buf []byte, broadcast chan []byte, txchan chan []byte, conn *net.TCPConn) {
-   //TODO: do not process transactions that have already been seen
+   //do not process transactions that have already been seen
+   transactionStr := string(buf)
+   tseenmutex.Lock()
+   if transactionSeen[transactionStr] {
+      if debugFlag {
+         fmt.Println("[Warning] Transaction seen: ", buf)
+      }
+      tseenmutex.Unlock()
+      return
+   } else {
+      transactionSeen[transactionStr] = true
+   }
+   tseenmutex.Unlock()
 
    sender := buf[1:33]
    receiver := buf[33:65]
@@ -289,9 +307,26 @@ func handleTransaction(buf []byte, broadcast chan []byte, txchan chan []byte, co
       return
    }
 
-   validTransaction:= false
+   //check that the transaction has valid sender and receiver, and that the sender has enough funds.
+   senderStr := string(sender)
+   receiverStr := string(receiver)
 
-   //TODO: check that the transaction has valid sender and receiver, and that the sender has enough funds.
+   validTransaction := false
+   aamountmutex.Lock()
+   _, receiverValid := accountAmount[receiverStr]
+   balance, senderValid := accountAmount[senderStr]
+
+   if receiverValid && senderValid {
+      if (balance >= amount) {
+         validTransaction = true
+         accountAmount[senderStr] -= amount
+      } else {
+         if debugFlag {
+            fmt.Println("[Warning] Double spending")
+         }
+      }
+   }
+   aamountmutex.Unlock()
 
    if validTransaction {
       tx := append([]byte(nil), buf[0:129]...)
@@ -313,8 +348,7 @@ func mineManager(txchan chan []byte, broadcast chan []byte, numtxinblock int, di
 
    currentheight := 0
    currenthash := sha256.Sum256([]byte{0})
-   //TODO: Don't forget to change this to your own netid!
-   mineraddr := sha256.Sum256([]byte("netid"))
+   mineraddr := sha256.Sum256([]byte("yh885"))
 
    noncechan := make(chan [32]byte)
 
@@ -368,6 +402,7 @@ func mineManager(txchan chan []byte, broadcast chan []byte, numtxinblock int, di
          bseenmutex.Unlock()
 
          //generate the Block message to advertize this block to other nodes.
+         //minedBlock: [nonce|prior_hash, hash, block_height, miner_address, txs]
          msg := append([]byte("2"), minedBlock[0:64]...)
          msg = append(msg, hash[:]...)
          msg = append(msg, minedBlock[64:]...)
@@ -428,6 +463,32 @@ func mineManager(txchan chan []byte, broadcast chan []byte, numtxinblock int, di
 
 func mine(difficulty int, block []byte, noncechan chan [32]byte) {
    var nonce [32]byte
+   tmpNonce := make([]byte, 32)
+
+   validateBlock := func(hash [32]byte) bool {
+      for i := 0; i < difficulty; i++ {
+         if hash[i] != 0 {
+            return false
+         }
+      }
+      return true
+   }
+
+   for {
+      rand.Read(tmpNonce)
+
+      //find a nonce that results in a hash with enough leading zeroes.
+      copy(block[0:32], tmpNonce)
+      hash := sha256.Sum256(block)
+      if validateBlock(hash) {
+         if debugFlag {
+            fmt.Println("hash valid!")
+            fmt.Println("hash:", hash)
+         }
+         break
+      }
+   }
+
+   copy(nonce[:], tmpNonce)
    noncechan <- nonce
-   //TODO: find a nonce that results in a hash with enough leading zeroes.
 }
