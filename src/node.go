@@ -320,6 +320,7 @@ func handleTransaction(buf []byte, broadcast chan []byte, txchan chan []byte, co
       if (balance >= amount) {
          validTransaction = true
          accountAmount[senderStr] -= amount
+         accountAmount[receiverStr] += amount
       } else {
          if debugFlag {
             fmt.Println("[Warning] Double spending")
