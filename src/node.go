@@ -15,6 +15,7 @@ import (
 //   "unsafe"
    "bufio"
    "math/rand"
+//   "runtime/pprof"
 )
 
 var transactionSeen map[string]bool
@@ -24,7 +25,13 @@ var bseenmutex sync.Mutex
 var accountAmount map[string]int
 var aamountmutex sync.Mutex
 var blockmsgs [][]byte
+
+//for debugging
 var debugFlag = false
+
+//for profiling
+var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
+var memprofile = flag.String("memprofile", "", "write memory profile to `file`")
 
 func main() {
    var port string
@@ -32,6 +39,21 @@ func main() {
    var numtxinblock int
    var difficulty int
    var numcores int
+
+/*
+   //don't know how to use, give up anyway
+   if *cpuprofile != "" {
+      cpuProfileFile, err := os.Create(*cpuprofile)
+      if err != nil {
+        print("could not create CPU profile: ", err)
+    }
+    defer cpuProfileFile.Close()
+    if err := pprof.StartCPUProfile(cpuProfileFile); err != nil {
+        print("could not start CPU profile: ", err)
+    }
+    defer pprof.StopCPUProfile()
+   }
+*/
 
    flag.StringVar(&port, "port", "", "The port for this node to listen on")
    flag.StringVar(&peersStr, "peers", "", "The list of peers for this node to broadcast to")
