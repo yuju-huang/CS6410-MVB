@@ -26,6 +26,8 @@ var accountAmount map[string]int
 var aamountmutex sync.Mutex
 var blockmsgs [][]byte
 
+var timeChan = make(chan int) // should not be global
+
 //for debugging
 var debugFlag = false
 
@@ -109,6 +111,9 @@ func main() {
    //This goroutine broadcasts anything received on the broadcast channel to each of the peers.
    go broadcaster(broadcast, peers, &broadcastgroup)
 
+   //Print average time in handling each block.
+   go countAverageMiningTime()
+
    //txchan is used to communicate incoming transactions to mineManager so that
    //they can be included in future mined blocks.
    txchan := make(chan []byte)
@@ -156,6 +161,22 @@ func main() {
             conngroup.Add(1)
             go handleIncomingConnection(conn, broadcast, txchan, shutdown, &shutonce, &conngroup, numtxinblock)
          }
+      }
+   }
+}
+
+func countAverageMiningTime() {
+   numBlock := 0
+   totalTime := 0
+   for {
+      select {
+         case time := <-timeChan:
+            numBlock += 1
+            totalTime += time
+            fmt.Println("Average mining time:", (totalTime/numBlock)/1000,
+                        " us for mining ", numBlock, " blocks in total")
+         default:
+            time.Sleep(50 * time.Millisecond)
       }
    }
 }
@@ -383,8 +404,10 @@ func mineManager(txchan chan []byte, broadcast chan []byte, numtxinblock int, di
       mineinfo = append(mineinfo, []byte(fmt.Sprintf("%032d",currentheight))...)
       mineinfo = append(mineinfo, mineraddr[:]...)
       mineinfo = append(mineinfo, blockdata[currentheight]...)
-      println("starting to mine block number ", currentheight)
-      go mine(difficulty, mineinfo, noncechan)
+      if debugFlag {
+         println("starting to mine block number ", currentheight)
+      }
+      go mine(difficulty, mineinfo, noncechan, numcores)
    }
 
    //The main loop of the mine manager. While txchan is open, we want to try to receive
@@ -412,7 +435,9 @@ func mineManager(txchan chan []byte, broadcast chan []byte, numtxinblock int, di
             }
          }
       case nonce := <-noncechan:
-         println("got a nonce")
+         if debugFlag {
+            println("got a nonce")
+         }
          currentlymining = false
 
          //compute the hash based on the nonce
@@ -484,9 +509,10 @@ func mineManager(txchan chan []byte, broadcast chan []byte, numtxinblock int, di
 
 }
 
-func mine(difficulty int, block []byte, noncechan chan [32]byte) {
+func mine(difficulty int, block []byte, noncechan chan [32]byte, numcores int) {
    var nonce [32]byte
-   tmpNonce := make([]byte, 32)
+
+   tmpNonceChan := make(chan []byte)
 
    validateBlock := func(hash [32]byte) bool {
       for i := 0; i < difficulty; i++ {
@@ -497,20 +523,67 @@ func mine(difficulty int, block []byte, noncechan chan [32]byte) {
       return true
    }
 
-   for {
-      rand.Read(tmpNonce)
+   var done sync.WaitGroup
+   done.Add(numcores)
+   mined := false
+   var minedMutex sync.Mutex
 
-      //find a nonce that results in a hash with enough leading zeroes.
-      copy(block[0:32], tmpNonce)
-      hash := sha256.Sum256(block)
-      if validateBlock(hash) {
-         if debugFlag {
-            fmt.Println("hash valid!")
-            fmt.Println("hash:", hash)
-         }
-         break
-      }
+   duplicateBlocks := make([][]byte, numcores)
+
+   t1 := time.Now()
+   //1. create goroutine according to numcores
+   for i:=0; i<numcores; i++ {
+      //duplicate block
+      duplicateBlock := append(duplicateBlocks[i], block...)
+
+      //mineImpl for finding nonce in parallel
+      go func(block []byte, noncechan chan []byte) {
+         tmpNonce := make([]byte, 32)
+
+         for {
+            if mined {
+               done.Done()
+               return
+            }
+
+            //generate random nonce
+            rand.Read(tmpNonce)
+
+            //find a nonce that results in a hash with enough leading zeroes.
+            copy(block[0:32], tmpNonce)
+            hash := sha256.Sum256(block)
+            if validateBlock(hash) {
+               minedMutex.Lock()
+               if mined {
+                  done.Done()
+                  minedMutex.Unlock()
+                  return
+               }
+
+               mined = true
+               noncechan <- tmpNonce
+               if debugFlag {
+                  fmt.Println("hash valid!")
+                  fmt.Println("hash:", hash)
+               }
+               minedMutex.Unlock()
+           }
+        }
+      }(duplicateBlock, tmpNonceChan)
    }
+
+   //2. if nonce is updated, use it and return
+   tmpNonce := <-tmpNonceChan
+   t2 := time.Now()
+   done.Wait()
+   close(tmpNonceChan)
+   mined = false
+
+   timeDiff := t2.Sub(t1)
+   if debugFlag {
+      fmt.Println("Use ", timeDiff, " to mine the block")
+   }
+   timeChan <- int(timeDiff)
 
    copy(nonce[:], tmpNonce)
    noncechan <- nonce
